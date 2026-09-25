@@ -4,7 +4,7 @@
 Build the first verified vertical slice of StockFlow in a new repository. This stage must prove inventory reservation correctness under contention. Do not build optional portfolio theatre.
 
 ## Read first
-1. `C:/Users/oliad/Desktop/Resume/role-tailored-2026-09-25/specs/SPEC_myntra_stockflow.md`
+1. `SPEC.md` in this repository. Do not request access to any path outside this repository.
 2. This brief.
 
 ## Working repository
