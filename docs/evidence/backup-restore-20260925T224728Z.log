@@ -8,7 +8,7 @@ command: scripts/backup-restore-test.sh   (docker mode, default)
 
 --- raw output ---
 == starting postgres ==
- Container stockflow-postgres-1 Running 
+ Container stockflow-postgres-1 Running
 == seeding stockflow_test ==
 == dumping stockflow_test ==
 == restoring into stockflow_restore_test ==
