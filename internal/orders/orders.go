@@ -8,6 +8,9 @@ import (
 
 const (
 	StatusAccepted  = "accepted"
+	StatusPicking   = "picking"
+	StatusPacked    = "packed"
+	StatusShipped   = "shipped"
 	StatusCancelled = "cancelled"
 
 	ReservationActive   = "active"
@@ -44,6 +47,7 @@ type Order struct {
 	CreatedAt   time.Time   `json:"created_at"`
 	UpdatedAt   time.Time   `json:"updated_at"`
 	CancelledAt *time.Time  `json:"cancelled_at,omitempty"`
+	ShippedAt   *time.Time  `json:"shipped_at,omitempty"`
 }
 
 type CancelInput struct {

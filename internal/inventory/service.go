@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/oliaditya05/stockflow/internal/audit"
 	"github.com/oliaditya05/stockflow/internal/platform/apperr"
 )
 
@@ -65,10 +66,34 @@ func (s *Service) Receive(ctx context.Context, in ReceiptInput) (ReceiptResult, 
 		return ReceiptResult{}, err
 	}
 
+	if err := audit.Record(ctx, tx, audit.EntryInput{
+		Actor:      in.Actor,
+		Action:     audit.ActionStockReceipt,
+		EntityType: audit.EntitySKU,
+		EntityID:   skuID.String(),
+		Reason:     &reason,
+		Details:    map[string]any{"quantity": in.Quantity, "movement_id": movement.ID},
+	}); err != nil {
+		return ReceiptResult{}, err
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return ReceiptResult{}, err
 	}
 	return ReceiptResult{Movement: movement, Balance: balance}, nil
+}
+
+func (s *Service) Balances(ctx context.Context, limit, offset int) ([]BalanceRow, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return s.Ledger.Balances(ctx, limit, offset)
 }
 
 func (s *Service) Balance(ctx context.Context, skuID uuid.UUID) (Balance, error) {

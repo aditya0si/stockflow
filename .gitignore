@@ -3,3 +3,11 @@
 *.exe
 *.test
 coverage.out
+
+# Web toolchain output. The embedded UI is built from web/ into
+# internal/webui/dist; only the placeholder that keeps go:embed compiling is
+# tracked.
+web/node_modules/
+web/coverage/
+/internal/webui/dist/*
+!/internal/webui/dist/.gitkeep

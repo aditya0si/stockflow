@@ -17,10 +17,10 @@ type Repository struct {
 func (r *Repository) Get(ctx context.Context, db postgres.DBTX, orderID uuid.UUID) (Order, error) {
 	var order Order
 	err := db.QueryRow(ctx, `
-		select id, status, created_at, updated_at, cancelled_at
+		select id, status, created_at, updated_at, cancelled_at, shipped_at
 		from orders
 		where id = $1`, orderID,
-	).Scan(&order.ID, &order.Status, &order.CreatedAt, &order.UpdatedAt, &order.CancelledAt)
+	).Scan(&order.ID, &order.Status, &order.CreatedAt, &order.UpdatedAt, &order.CancelledAt, &order.ShippedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Order{}, pgx.ErrNoRows
 	}
@@ -44,7 +44,7 @@ func (r *Repository) List(ctx context.Context, limit, offset int) ([]Order, erro
 		offset = 0
 	}
 	rows, err := r.Pool.Query(ctx, `
-		select id, status, created_at, updated_at, cancelled_at
+		select id, status, created_at, updated_at, cancelled_at, shipped_at
 		from orders
 		order by created_at desc, id desc
 		limit $1 offset $2`, limit, offset)
@@ -56,7 +56,7 @@ func (r *Repository) List(ctx context.Context, limit, offset int) ([]Order, erro
 	orders := make([]Order, 0)
 	for rows.Next() {
 		var order Order
-		if err := rows.Scan(&order.ID, &order.Status, &order.CreatedAt, &order.UpdatedAt, &order.CancelledAt); err != nil {
+		if err := rows.Scan(&order.ID, &order.Status, &order.CreatedAt, &order.UpdatedAt, &order.CancelledAt, &order.ShippedAt); err != nil {
 			return nil, err
 		}
 		orders = append(orders, order)

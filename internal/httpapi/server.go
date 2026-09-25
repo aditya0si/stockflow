@@ -10,18 +10,23 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/oliaditya05/stockflow/internal/catalog"
+	"github.com/oliaditya05/stockflow/internal/fulfilment"
 	"github.com/oliaditya05/stockflow/internal/inventory"
 	"github.com/oliaditya05/stockflow/internal/orders"
 	"github.com/oliaditya05/stockflow/internal/platform/apperr"
 	"github.com/oliaditya05/stockflow/internal/platform/httpx"
+	"github.com/oliaditya05/stockflow/internal/reconciliation"
 )
 
 type Server struct {
-	Catalog   *catalog.Service
-	Inventory *inventory.Service
-	Orders    *orders.Service
-	Health    func(ctx context.Context) error
-	Logger    *slog.Logger
+	Catalog        *catalog.Service
+	Inventory      *inventory.Service
+	Orders         *orders.Service
+	Fulfilment     *fulfilment.Service
+	Reconciliation *reconciliation.Service
+	Web            http.Handler
+	Health         func(ctx context.Context) error
+	Logger         *slog.Logger
 }
 
 func (s *Server) Handler() http.Handler {
@@ -37,17 +42,42 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("POST /inventory/receipts", s.handleReceive)
 	mux.HandleFunc("GET /inventory/movements", s.handleMovements)
+	mux.HandleFunc("GET /inventory/balances", s.handleListBalances)
 
 	mux.HandleFunc("POST /orders", s.handleCreateOrder)
 	mux.HandleFunc("GET /orders", s.handleListOrders)
 	mux.HandleFunc("GET /orders/{id}", s.handleGetOrder)
+	mux.HandleFunc("GET /orders/{id}/events", s.handleOrderEvents)
 	mux.HandleFunc("POST /orders/{id}/cancel", s.handleCancelOrder)
+	mux.HandleFunc("POST /orders/{id}/pick", s.handleTransition("pick"))
+	mux.HandleFunc("POST /orders/{id}/pack", s.handleTransition("pack"))
+	mux.HandleFunc("POST /orders/{id}/ship", s.handleTransition("ship"))
 
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		httpx.WriteProblem(w, r, apperr.NotFound("not_found", "no route for "+r.Method+" "+r.URL.Path))
-	})
+	mux.HandleFunc("POST /reconciliation/runs", s.handleRunReconciliation)
+	mux.HandleFunc("GET /reconciliation/runs", s.handleListReconciliationRuns)
+	mux.HandleFunc("GET /reconciliation/runs/{id}", s.handleGetReconciliationRun)
+
+	mux.HandleFunc("/", s.handleFallback)
 
 	return httpx.RequestID(httpx.AccessLog(s.Logger)(httpx.Recoverer(s.Logger)(mux)))
+}
+
+var apiPrefixes = []string{
+	"/healthz", "/readyz", "/skus", "/inventory", "/orders", "/reconciliation",
+}
+
+func (s *Server) handleFallback(w http.ResponseWriter, r *http.Request) {
+	for _, prefix := range apiPrefixes {
+		if r.URL.Path == prefix || strings.HasPrefix(r.URL.Path, prefix+"/") {
+			httpx.WriteProblem(w, r, apperr.NotFound("not_found", "no route for "+r.Method+" "+r.URL.Path))
+			return
+		}
+	}
+	if s.Web == nil {
+		httpx.WriteProblem(w, r, apperr.NotFound("not_found", "no route for "+r.Method+" "+r.URL.Path))
+		return
+	}
+	s.Web.ServeHTTP(w, r)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +218,16 @@ func (s *Server) handleMovements(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"movements": movements})
 }
 
+func (s *Server) handleListBalances(w http.ResponseWriter, r *http.Request) {
+	limit, offset := pagination(r)
+	balances, err := s.Inventory.Balances(r.Context(), limit, offset)
+	if err != nil {
+		httpx.WriteError(w, r, s.Logger, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"balances": balances})
+}
+
 func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	var request orders.CreateOrderRequest
 	if !httpx.DecodeJSON(w, r, &request) {
@@ -253,6 +293,91 @@ func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, order)
+}
+
+func (s *Server) handleOrderEvents(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	events, err := s.Fulfilment.Events(r.Context(), id)
+	if err != nil {
+		httpx.WriteError(w, r, s.Logger, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"events": events})
+}
+
+type transitionRequest struct {
+	Actor  string `json:"actor"`
+	Reason string `json:"reason"`
+}
+
+func (s *Server) handleTransition(action string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := pathUUID(w, r, "id")
+		if !ok {
+			return
+		}
+		var request transitionRequest
+		if r.Body != nil && r.ContentLength != 0 {
+			if !httpx.DecodeJSON(w, r, &request) {
+				return
+			}
+		}
+		input := fulfilment.TransitionInput{Actor: request.Actor, Reason: request.Reason}
+		var (
+			order orders.Order
+			err   error
+		)
+		switch action {
+		case "pick":
+			order, err = s.Fulfilment.Pick(r.Context(), id, input)
+		case "pack":
+			order, err = s.Fulfilment.Pack(r.Context(), id, input)
+		case "ship":
+			order, err = s.Fulfilment.Ship(r.Context(), id, input)
+		default:
+			err = apperr.Internal("unknown transition action " + action)
+		}
+		if err != nil {
+			httpx.WriteError(w, r, s.Logger, err)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, order)
+	}
+}
+
+func (s *Server) handleRunReconciliation(w http.ResponseWriter, r *http.Request) {
+	run, err := s.Reconciliation.Run(r.Context())
+	if err != nil {
+		httpx.WriteError(w, r, s.Logger, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, run)
+}
+
+func (s *Server) handleListReconciliationRuns(w http.ResponseWriter, r *http.Request) {
+	limit, offset := pagination(r)
+	runs, err := s.Reconciliation.ListRuns(r.Context(), limit, offset)
+	if err != nil {
+		httpx.WriteError(w, r, s.Logger, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"runs": runs})
+}
+
+func (s *Server) handleGetReconciliationRun(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	run, err := s.Reconciliation.GetRun(r.Context(), id)
+	if err != nil {
+		httpx.WriteError(w, r, s.Logger, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, run)
 }
 
 func pathUUID(w http.ResponseWriter, r *http.Request, name string) (uuid.UUID, bool) {

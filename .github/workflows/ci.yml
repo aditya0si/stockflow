@@ -5,8 +5,8 @@ on:
   pull_request:
 
 jobs:
-  test:
-    name: format, vet, tests, race
+  go:
+    name: format, vet, tests, race, demo
     runs-on: ubuntu-latest
 
     services:
@@ -47,5 +47,42 @@ jobs:
       - name: integration tests
         run: go test -count=1 ./tests/...
 
+      - name: deterministic demo
+        env:
+          STOCKFLOW_ALLOW_DEMO_FIXTURES: "true"
+        run: go run ./cmd/demo
+
       - name: race detector
         run: go test -race -count=1 ./...
+
+  web:
+    name: format, typecheck, test, build
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: install
+        run: npm ci
+
+      - name: formatting
+        run: npm run format:check
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: tests
+        run: npm test
+
+      - name: build
+        run: npm run build

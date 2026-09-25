@@ -17,11 +17,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oliaditya05/stockflow/internal/catalog"
+	"github.com/oliaditya05/stockflow/internal/fulfilment"
 	"github.com/oliaditya05/stockflow/internal/httpapi"
 	"github.com/oliaditya05/stockflow/internal/inventory"
 	"github.com/oliaditya05/stockflow/internal/orders"
 	"github.com/oliaditya05/stockflow/internal/platform/observability"
 	"github.com/oliaditya05/stockflow/internal/platform/postgres"
+	"github.com/oliaditya05/stockflow/internal/reconciliation"
 	"github.com/oliaditya05/stockflow/migrations"
 )
 
@@ -68,14 +70,17 @@ func setup() {
 	ledger := &inventory.Ledger{Pool: pool}
 	catalogService := &catalog.Service{Pool: pool, Repo: &catalog.Repository{Pool: pool}, Ledger: ledger}
 	inventoryService := &inventory.Service{Pool: pool, Ledger: ledger}
-	ordersService := &orders.Service{Pool: pool, Ledger: ledger, Repo: &orders.Repository{Pool: pool}}
+	ordersRepo := &orders.Repository{Pool: pool}
+	ordersService := &orders.Service{Pool: pool, Ledger: ledger, Repo: ordersRepo}
 
 	server := &httpapi.Server{
-		Catalog:   catalogService,
-		Inventory: inventoryService,
-		Orders:    ordersService,
-		Health:    pool.Ping,
-		Logger:    observability.NewLogger("error"),
+		Catalog:        catalogService,
+		Inventory:      inventoryService,
+		Orders:         ordersService,
+		Fulfilment:     &fulfilment.Service{Pool: pool, Ledger: ledger, Repo: ordersRepo},
+		Reconciliation: &reconciliation.Service{Pool: pool},
+		Health:         pool.Ping,
+		Logger:         observability.NewLogger("error"),
 	}
 	testPool = pool
 	testAPI = httptest.NewServer(server.Handler())
@@ -215,6 +220,50 @@ func decodeProblem(t *testing.T, body []byte) problemBody {
 		t.Fatalf("decode problem: %v", err)
 	}
 	return problem
+}
+
+type eventBody struct {
+	ID         int64  `json:"id"`
+	OrderID    string `json:"order_id"`
+	FromStatus string `json:"from_status"`
+	ToStatus   string `json:"to_status"`
+	Actor      string `json:"actor"`
+}
+
+type findingBody struct {
+	ID        string `json:"id"`
+	CheckName string `json:"check_name"`
+	SKUID     string `json:"sku_id"`
+	Expected  string `json:"expected"`
+	Observed  string `json:"observed"`
+}
+
+type runBody struct {
+	ID            string        `json:"id"`
+	Status        string        `json:"status"`
+	ChecksRun     int           `json:"checks_run"`
+	FindingsCount int           `json:"findings_count"`
+	Findings      []findingBody `json:"findings"`
+}
+
+func transition(t *testing.T, api *httptest.Server, orderID, action string, actor string) (*http.Response, []byte) {
+	t.Helper()
+	return doJSON(t, http.MethodPost, api.URL+"/orders/"+orderID+"/"+action,
+		map[string]any{"actor": actor, "reason": "integration " + action}, nil)
+}
+
+func runReconciliation(t *testing.T, api *httptest.Server) (*http.Response, []byte) {
+	t.Helper()
+	return doJSON(t, http.MethodPost, api.URL+"/reconciliation/runs", map[string]any{}, nil)
+}
+
+func decodeRun(t *testing.T, body []byte) runBody {
+	t.Helper()
+	var run runBody
+	if err := json.Unmarshal(body, &run); err != nil {
+		t.Fatalf("decode run: %v", err)
+	}
+	return run
 }
 
 func scalarInt(t *testing.T, pool *pgxpool.Pool, query string, args ...any) int {

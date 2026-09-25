@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/oliaditya05/stockflow/internal/audit"
 	"github.com/oliaditya05/stockflow/internal/catalog"
 	"github.com/oliaditya05/stockflow/internal/inventory"
 	"github.com/oliaditya05/stockflow/internal/platform/apperr"
@@ -194,6 +195,15 @@ func (s *Service) createOnce(ctx context.Context, in CreateOrderInput, lines []n
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	if err := audit.Record(ctx, tx, audit.EntryInput{
+		Actor:      in.Scope,
+		Action:     audit.ActionOrderCreated,
+		EntityType: audit.EntityOrder,
+		EntityID:   orderID.String(),
+		Details:    map[string]any{"lines": len(items)},
+	}); err != nil {
+		return Order{}, err
+	}
 	body, err := json.Marshal(order)
 	if err != nil {
 		return Order{}, err
@@ -328,6 +338,9 @@ func (s *Service) CancelOrder(ctx context.Context, orderID uuid.UUID, in CancelI
 		}
 		return order, nil
 	}
+	if status == StatusShipped {
+		return Order{}, illegalTransition(status, StatusCancelled)
+	}
 
 	reservations, err := lockActiveReservations(ctx, tx, orderID)
 	if err != nil {
@@ -374,6 +387,30 @@ func (s *Service) CancelOrder(ctx context.Context, orderID uuid.UUID, in CancelI
 		update orders
 		set status = $2, cancelled_at = now(), updated_at = now()
 		where id = $1`, orderID, StatusCancelled); err != nil {
+		return Order{}, err
+	}
+
+	eventReason := in.Reason
+	if eventReason == "" {
+		eventReason = "order cancelled"
+	}
+	if err := audit.RecordFulfilmentEvent(ctx, tx, audit.EventInput{
+		OrderID:    orderID,
+		FromStatus: status,
+		ToStatus:   StatusCancelled,
+		Actor:      in.Actor,
+		Reason:     &eventReason,
+	}); err != nil {
+		return Order{}, err
+	}
+	if err := audit.Record(ctx, tx, audit.EntryInput{
+		Actor:      in.Actor,
+		Action:     audit.ActionOrderCancelled,
+		EntityType: audit.EntityOrder,
+		EntityID:   orderID.String(),
+		Reason:     &eventReason,
+		Details:    map[string]any{"from_status": status},
+	}); err != nil {
 		return Order{}, err
 	}
 
@@ -427,6 +464,20 @@ func (s *Service) GetOrder(ctx context.Context, orderID uuid.UUID) (Order, error
 
 func (s *Service) ListOrders(ctx context.Context, limit, offset int) ([]Order, error) {
 	return s.Repo.List(ctx, limit, offset)
+}
+
+// IllegalTransition returns the stable problem used when a requested
+// fulfilment transition is not legal from the order's current status.
+func IllegalTransition(from, to string) *apperr.Error {
+	return apperr.
+		Conflict("illegal_transition", "Illegal order transition",
+			"cannot move order from "+from+" to "+to).
+		With("from_status", from).
+		With("to_status", to)
+}
+
+func illegalTransition(from, to string) *apperr.Error {
+	return IllegalTransition(from, to)
 }
 
 func isRetryableDB(err error) bool {

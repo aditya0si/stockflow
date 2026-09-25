@@ -78,6 +78,10 @@ func main() {
 func resetDatabase(ctx context.Context, pool *pgxpool.Pool) error {
 	_, err := pool.Exec(ctx, `
 		truncate table
+			reconciliation_findings,
+			reconciliation_runs,
+			audit_entries,
+			fulfilment_events,
 			inventory_movements,
 			reservations,
 			order_items,

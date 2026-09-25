@@ -1,6 +1,10 @@
 .git
 .env
 bin
+build
 *.exe
 *.test
 coverage.out
+web/node_modules
+web/coverage
+internal/webui/dist

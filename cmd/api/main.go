@@ -12,11 +12,14 @@ import (
 	"time"
 
 	"github.com/oliaditya05/stockflow/internal/catalog"
+	"github.com/oliaditya05/stockflow/internal/fulfilment"
 	"github.com/oliaditya05/stockflow/internal/httpapi"
 	"github.com/oliaditya05/stockflow/internal/inventory"
 	"github.com/oliaditya05/stockflow/internal/orders"
 	"github.com/oliaditya05/stockflow/internal/platform/observability"
 	"github.com/oliaditya05/stockflow/internal/platform/postgres"
+	"github.com/oliaditya05/stockflow/internal/reconciliation"
+	"github.com/oliaditya05/stockflow/internal/webui"
 	"github.com/oliaditya05/stockflow/migrations"
 )
 
@@ -57,14 +60,20 @@ func main() {
 	ledger := &inventory.Ledger{Pool: pool}
 	catalogService := &catalog.Service{Pool: pool, Repo: &catalog.Repository{Pool: pool}, Ledger: ledger}
 	inventoryService := &inventory.Service{Pool: pool, Ledger: ledger}
-	ordersService := &orders.Service{Pool: pool, Ledger: ledger, Repo: &orders.Repository{Pool: pool}}
+	ordersRepo := &orders.Repository{Pool: pool}
+	ordersService := &orders.Service{Pool: pool, Ledger: ledger, Repo: ordersRepo}
+	fulfilmentService := &fulfilment.Service{Pool: pool, Ledger: ledger, Repo: ordersRepo}
+	reconciliationService := &reconciliation.Service{Pool: pool}
 
 	server := &httpapi.Server{
-		Catalog:   catalogService,
-		Inventory: inventoryService,
-		Orders:    ordersService,
-		Health:    pool.Ping,
-		Logger:    logger,
+		Catalog:        catalogService,
+		Inventory:      inventoryService,
+		Orders:         ordersService,
+		Fulfilment:     fulfilmentService,
+		Reconciliation: reconciliationService,
+		Web:            webui.Handler(),
+		Health:         pool.Ping,
+		Logger:         logger,
 	}
 
 	httpServer := &http.Server{

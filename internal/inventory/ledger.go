@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -88,6 +89,47 @@ func (l *Ledger) Balance(ctx context.Context, skuID uuid.UUID) (Balance, error) 
 		return Balance{}, fmt.Errorf("balance for sku %s: %w", skuID, err)
 	}
 	return balance, err
+}
+
+// BalanceRow is a balance joined with its SKU identity, used by the operator
+// UI's single list view.
+type BalanceRow struct {
+	SKUID     uuid.UUID `json:"sku_id"`
+	Code      string    `json:"code"`
+	Name      string    `json:"name"`
+	OnHand    int       `json:"on_hand"`
+	Reserved  int       `json:"reserved"`
+	Available int       `json:"available"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (l *Ledger) Balances(ctx context.Context, limit, offset int) ([]BalanceRow, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := l.Pool.Query(ctx, `
+		select b.sku_id, s.code, s.name, b.on_hand, b.reserved, b.available, b.updated_at
+		from inventory_balances b
+		join skus s on s.id = b.sku_id
+		order by s.code
+		limit $1 offset $2`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	balances := make([]BalanceRow, 0)
+	for rows.Next() {
+		var row BalanceRow
+		if err := rows.Scan(&row.SKUID, &row.Code, &row.Name, &row.OnHand, &row.Reserved, &row.Available, &row.UpdatedAt); err != nil {
+			return nil, err
+		}
+		balances = append(balances, row)
+	}
+	return balances, rows.Err()
 }
 
 func (l *Ledger) Movements(ctx context.Context, filter MovementFilter) ([]Movement, error) {
