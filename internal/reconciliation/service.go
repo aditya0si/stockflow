@@ -19,12 +19,15 @@ type Service struct {
 // Run executes every check in a read-only transaction, then persists the run
 // and its findings in a separate transaction. It never writes to inventory,
 // orders, or reservations.
-func (s *Service) Run(ctx context.Context) (Run, error) {
+func (s *Service) Run(ctx context.Context, actor string) (Run, error) {
 	started := timeNow()
 
 	findings, checksRun, err := s.checkAll(ctx)
 	if err != nil {
 		return Run{}, err
+	}
+	if actor == "" {
+		actor = "reconciliation"
 	}
 	finished := timeNow()
 
@@ -41,7 +44,7 @@ func (s *Service) Run(ctx context.Context) (Run, error) {
 		run.Status = StatusFindings
 	}
 
-	if err := s.persist(ctx, run); err != nil {
+	if err := s.persist(ctx, run, actor); err != nil {
 		return Run{}, err
 	}
 	return run, nil
@@ -60,8 +63,9 @@ func (s *Service) checkAll(ctx context.Context) ([]Finding, int, error) {
 
 	checks := []func(context.Context, pgx.Tx) ([]Finding, error){
 		checkReservedMatchesActive,
+		checkBalanceMatchesLedger,
 		checkTerminalHasNoActive,
-		checkShippedHasDecrement,
+		checkShippedEvidence,
 		checkManualHasActorReason,
 		checkBalanceInvariants,
 	}
@@ -81,7 +85,7 @@ func (s *Service) checkAll(ctx context.Context) ([]Finding, int, error) {
 	return findings, len(checks), nil
 }
 
-func (s *Service) persist(ctx context.Context, run Run) error {
+func (s *Service) persist(ctx context.Context, run Run, actor string) error {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -112,7 +116,7 @@ func (s *Service) persist(ctx context.Context, run Run) error {
 	}
 
 	if err := audit.Record(ctx, tx, audit.EntryInput{
-		Actor:      "reconciliation",
+		Actor:      actor,
 		Action:     audit.ActionReconciliationRun,
 		EntityType: audit.EntityReconciliationRun,
 		EntityID:   run.ID.String(),
@@ -292,17 +296,164 @@ func checkTerminalHasNoActive(ctx context.Context, tx pgx.Tx) ([]Finding, error)
 	return findings, rows.Err()
 }
 
-func checkShippedHasDecrement(ctx context.Context, tx pgx.Tx) ([]Finding, error) {
+// checkShippedEvidence requires, for every line of a shipped order, exactly one
+// shipment movement whose order ID, order-item ID, SKU ID, and on-hand effect
+// all match the line. It reports missing, duplicate, wrong-order, wrong-SKU, and
+// wrong-quantity evidence, plus any shipment movement whose references disagree
+// with the order item it names. It never repairs.
+func checkShippedEvidence(ctx context.Context, tx pgx.Tx) ([]Finding, error) {
+	findings := make([]Finding, 0)
+
 	rows, err := tx.Query(ctx, `
-		select oi.order_id, oi.id, oi.sku_id, s.code, oi.quantity,
-		       count(m.id), coalesce(sum(m.delta_on_hand), 0)
-		from orders o
-		join order_items oi on oi.order_id = o.id
-		join skus s on s.id = oi.sku_id
-		left join inventory_movements m on m.order_item_id = oi.id and m.kind = 'shipment'
-		where o.status = 'shipped'
-		group by oi.order_id, oi.id, oi.sku_id, s.code, oi.quantity
-		having count(m.id) <> 1 or coalesce(sum(m.delta_on_hand), 0) <> -oi.quantity`)
+		with shipped_items as (
+			select oi.id as item_id, oi.order_id, oi.sku_id, oi.quantity, s.code
+			from orders o
+			join order_items oi on oi.order_id = o.id
+			join skus s on s.id = oi.sku_id
+			where o.status = 'shipped'
+		),
+		evidence as (
+			select m.order_item_id as item_id,
+			       count(*) as movements,
+			       count(*) filter (
+			           where m.order_id = si.order_id
+			             and m.sku_id = si.sku_id
+			             and m.delta_on_hand = -si.quantity
+			       ) as matching,
+			       coalesce(sum(m.delta_on_hand), 0) as total
+			from inventory_movements m
+			join shipped_items si on si.item_id = m.order_item_id
+			where m.kind = 'shipment'
+			group by m.order_item_id
+		)
+		select si.item_id, si.order_id, si.sku_id, si.code, si.quantity,
+		       coalesce(e.movements, 0), coalesce(e.matching, 0), coalesce(e.total, 0)
+		from shipped_items si
+		left join evidence e on e.item_id = si.item_id
+		where coalesce(e.movements, 0) <> 1
+		   or coalesce(e.matching, 0) <> 1
+		   or coalesce(e.total, 0) <> -si.quantity`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var (
+			itemID    uuid.UUID
+			orderID   uuid.UUID
+			skuID     uuid.UUID
+			code      string
+			quantity  int
+			movements int
+			matching  int
+			total     int
+		)
+		if err := rows.Scan(&itemID, &orderID, &skuID, &code, &quantity, &movements, &matching, &total); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		order, sku := orderID, skuID
+		ref := code
+		findings = append(findings, Finding{
+			CheckName: CheckShippedEvidence,
+			SKUID:     &sku,
+			OrderID:   &order,
+			EntityRef: &ref,
+			Expected:  fmt.Sprintf("exactly 1 shipment movement for order %s item %s sku %s of -%d", orderID, itemID, skuID, quantity),
+			Observed:  fmt.Sprintf("%d shipment movements, %d matching the line, totalling %d", movements, matching, total),
+			Details: map[string]any{
+				"code":                code,
+				"order_item_id":       itemID.String(),
+				"quantity":            quantity,
+				"shipment_movements":  movements,
+				"matching_movements":  matching,
+				"total_delta_on_hand": total,
+			},
+		})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	// A shipment movement may name an item but carry a different order or SKU,
+	// or name no item at all. The identity foreign key prevents this for new
+	// writes; this catches legacy or directly-injected rows.
+	mismatched, err := tx.Query(ctx, `
+		select m.id, m.order_id, m.order_item_id, m.sku_id, oi.order_id, oi.sku_id
+		from inventory_movements m
+		left join order_items oi on oi.id = m.order_item_id
+		where m.kind = 'shipment'
+		  and (oi.id is null
+		       or m.order_id is distinct from oi.order_id
+		       or m.sku_id <> oi.sku_id)`)
+	if err != nil {
+		return nil, err
+	}
+	defer mismatched.Close()
+	for mismatched.Next() {
+		var (
+			movementID  int64
+			orderID     *uuid.UUID
+			itemID      *uuid.UUID
+			skuID       uuid.UUID
+			itemOrderID *uuid.UUID
+			itemSKUID   *uuid.UUID
+		)
+		if err := mismatched.Scan(&movementID, &orderID, &itemID, &skuID, &itemOrderID, &itemSKUID); err != nil {
+			return nil, err
+		}
+		sku := skuID
+		expectedRef := "matching order/item/sku"
+		observedRef := fmt.Sprintf("movement %d order=%s item=%s sku=%s", movementID, uuidText(orderID), uuidText(itemID), skuID)
+		finding := Finding{
+			CheckName: CheckShippedEvidence,
+			SKUID:     &sku,
+			EntityRef: &expectedRef,
+			Expected:  fmt.Sprintf("shipment movement references order %s item %s sku %s", uuidText(itemOrderID), uuidText(itemID), uuidText(itemSKUID)),
+			Observed:  observedRef,
+			Details:   map[string]any{"movement_id": movementID},
+		}
+		if itemOrderID != nil {
+			order := *itemOrderID
+			finding.OrderID = &order
+		}
+		findings = append(findings, finding)
+	}
+	return findings, mismatched.Err()
+}
+
+func uuidText(id *uuid.UUID) string {
+	if id == nil {
+		return "null"
+	}
+	return id.String()
+}
+
+// checkBalanceMatchesLedger compares every SKU's stored balance with the sums of
+// its immutable movements. It includes SKUs whose balance row is missing, and
+// reports expected and observed values without repairing anything.
+func checkBalanceMatchesLedger(ctx context.Context, tx pgx.Tx) ([]Finding, error) {
+	rows, err := tx.Query(ctx, `
+		with ledger as (
+			select sku_id,
+			       coalesce(sum(delta_on_hand), 0) as on_hand,
+			       coalesce(sum(delta_reserved), 0) as reserved
+			from inventory_movements
+			group by sku_id
+		)
+		select s.id, s.code,
+		       b.sku_id is not null as has_balance,
+		       coalesce(b.on_hand, 0) as observed_on_hand,
+		       coalesce(l.on_hand, 0) as expected_on_hand,
+		       coalesce(b.reserved, 0) as observed_reserved,
+		       coalesce(l.reserved, 0) as expected_reserved
+		from skus s
+		left join inventory_balances b on b.sku_id = s.id
+		left join ledger l on l.sku_id = s.id
+		where b.sku_id is null
+		   or b.on_hand <> coalesce(l.on_hand, 0)
+		   or b.reserved <> coalesce(l.reserved, 0)`)
 	if err != nil {
 		return nil, err
 	}
@@ -311,27 +462,37 @@ func checkShippedHasDecrement(ctx context.Context, tx pgx.Tx) ([]Finding, error)
 	findings := make([]Finding, 0)
 	for rows.Next() {
 		var (
-			orderID   uuid.UUID
-			itemID    uuid.UUID
-			skuID     uuid.UUID
-			code      string
-			quantity  int
-			movements int
-			total     int
+			skuID            uuid.UUID
+			code             string
+			hasBalance       bool
+			observedOnHand   int
+			expectedOnHand   int
+			observedReserved int
+			expectedReserved int
 		)
-		if err := rows.Scan(&orderID, &itemID, &skuID, &code, &quantity, &movements, &total); err != nil {
+		if err := rows.Scan(&skuID, &code, &hasBalance, &observedOnHand, &expectedOnHand, &observedReserved, &expectedReserved); err != nil {
 			return nil, err
 		}
-		order, sku := orderID, skuID
+		sku := skuID
 		ref := code
+		observed := fmt.Sprintf("on_hand=%d reserved=%d", observedOnHand, observedReserved)
+		if !hasBalance {
+			observed = "no balance row"
+		}
 		findings = append(findings, Finding{
-			CheckName: CheckShippedHasDecrement,
+			CheckName: CheckBalanceMatchesLedger,
 			SKUID:     &sku,
-			OrderID:   &order,
 			EntityRef: &ref,
-			Expected:  fmt.Sprintf("1 shipment movement totalling -%d", quantity),
-			Observed:  fmt.Sprintf("%d shipment movements totalling %d", movements, total),
-			Details:   map[string]any{"code": code, "order_item_id": itemID.String(), "quantity": quantity},
+			Expected:  fmt.Sprintf("on_hand=%d reserved=%d (sum of movements)", expectedOnHand, expectedReserved),
+			Observed:  observed,
+			Details: map[string]any{
+				"code":              code,
+				"balance_present":   hasBalance,
+				"expected_on_hand":  expectedOnHand,
+				"observed_on_hand":  observedOnHand,
+				"expected_reserved": expectedReserved,
+				"observed_reserved": observedReserved,
+			},
 		})
 	}
 	return findings, rows.Err()

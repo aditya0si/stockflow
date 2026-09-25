@@ -15,8 +15,9 @@ const (
 	StatusFindings = "findings"
 
 	CheckReservedMatchesActive = "reserved_matches_active_reservations"
+	CheckBalanceMatchesLedger  = "balance_matches_movement_ledger"
 	CheckTerminalHasNoActive   = "terminal_orders_have_no_active_reservation"
-	CheckShippedHasDecrement   = "shipped_line_has_one_decrement"
+	CheckShippedEvidence       = "shipped_line_has_one_matching_decrement"
 	CheckManualHasActorReason  = "manual_movement_has_actor_and_reason"
 	CheckBalanceInvariants     = "balance_values_respect_invariants"
 )

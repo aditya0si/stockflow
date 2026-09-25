@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/oliaditya05/stockflow/internal/auth"
 	"github.com/oliaditya05/stockflow/internal/catalog"
 	"github.com/oliaditya05/stockflow/internal/fulfilment"
 	"github.com/oliaditya05/stockflow/internal/inventory"
@@ -27,57 +28,84 @@ type Server struct {
 	Web            http.Handler
 	Health         func(ctx context.Context) error
 	Logger         *slog.Logger
+
+	Auth                 *auth.Manager
+	LoginLimiter         *auth.LoginLimiter
+	AuthLoginMaxAttempts int
+	AuthLoginWindow      time.Duration
 }
 
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
+	api := http.NewServeMux()
 
-	mux.HandleFunc("GET /healthz", s.handleHealth)
-	mux.HandleFunc("GET /readyz", s.handleReady)
+	api.HandleFunc("POST /skus", s.handleCreateSKU)
+	api.HandleFunc("GET /skus", s.handleListSKUs)
+	api.HandleFunc("GET /skus/{id}", s.handleGetSKU)
+	api.HandleFunc("GET /skus/{id}/balance", s.handleGetBalance)
 
-	mux.HandleFunc("POST /skus", s.handleCreateSKU)
-	mux.HandleFunc("GET /skus", s.handleListSKUs)
-	mux.HandleFunc("GET /skus/{id}", s.handleGetSKU)
-	mux.HandleFunc("GET /skus/{id}/balance", s.handleGetBalance)
+	api.HandleFunc("POST /inventory/receipts", s.handleReceive)
+	api.HandleFunc("GET /inventory/movements", s.handleMovements)
+	api.HandleFunc("GET /inventory/balances", s.handleListBalances)
 
-	mux.HandleFunc("POST /inventory/receipts", s.handleReceive)
-	mux.HandleFunc("GET /inventory/movements", s.handleMovements)
-	mux.HandleFunc("GET /inventory/balances", s.handleListBalances)
+	api.HandleFunc("POST /orders", s.handleCreateOrder)
+	api.HandleFunc("GET /orders", s.handleListOrders)
+	api.HandleFunc("GET /orders/{id}", s.handleGetOrder)
+	api.HandleFunc("GET /orders/{id}/events", s.handleOrderEvents)
+	api.HandleFunc("POST /orders/{id}/cancel", s.handleCancelOrder)
+	api.HandleFunc("POST /orders/{id}/pick", s.handleTransition("pick"))
+	api.HandleFunc("POST /orders/{id}/pack", s.handleTransition("pack"))
+	api.HandleFunc("POST /orders/{id}/ship", s.handleTransition("ship"))
 
-	mux.HandleFunc("POST /orders", s.handleCreateOrder)
-	mux.HandleFunc("GET /orders", s.handleListOrders)
-	mux.HandleFunc("GET /orders/{id}", s.handleGetOrder)
-	mux.HandleFunc("GET /orders/{id}/events", s.handleOrderEvents)
-	mux.HandleFunc("POST /orders/{id}/cancel", s.handleCancelOrder)
-	mux.HandleFunc("POST /orders/{id}/pick", s.handleTransition("pick"))
-	mux.HandleFunc("POST /orders/{id}/pack", s.handleTransition("pack"))
-	mux.HandleFunc("POST /orders/{id}/ship", s.handleTransition("ship"))
+	api.HandleFunc("POST /reconciliation/runs", s.handleRunReconciliation)
+	api.HandleFunc("GET /reconciliation/runs", s.handleListReconciliationRuns)
+	api.HandleFunc("GET /reconciliation/runs/{id}", s.handleGetReconciliationRun)
 
-	mux.HandleFunc("POST /reconciliation/runs", s.handleRunReconciliation)
-	mux.HandleFunc("GET /reconciliation/runs", s.handleListReconciliationRuns)
-	mux.HandleFunc("GET /reconciliation/runs/{id}", s.handleGetReconciliationRun)
+	api.HandleFunc("/", s.handleAPIFallback)
 
-	mux.HandleFunc("/", s.handleFallback)
+	root := http.NewServeMux()
+	root.HandleFunc("GET /healthz", s.handleHealth)
+	root.HandleFunc("GET /readyz", s.handleReady)
+	root.HandleFunc("POST /auth/login", s.handleLogin)
+	root.HandleFunc("GET /auth/session", s.handleSession)
+	root.Handle("POST /auth/logout", s.requireSession(s.requireCSRF(http.HandlerFunc(s.handleLogout))))
+	root.Handle("/", s.dispatch(api))
 
-	return httpx.RequestID(httpx.AccessLog(s.Logger)(httpx.Recoverer(s.Logger)(mux)))
+	return httpx.RequestID(httpx.AccessLog(s.Logger)(httpx.Recoverer(s.Logger)(root)))
 }
 
-var apiPrefixes = []string{
-	"/healthz", "/readyz", "/skus", "/inventory", "/orders", "/reconciliation",
-}
-
-func (s *Server) handleFallback(w http.ResponseWriter, r *http.Request) {
-	for _, prefix := range apiPrefixes {
-		if r.URL.Path == prefix || strings.HasPrefix(r.URL.Path, prefix+"/") {
+// dispatch sends API paths through session + CSRF middleware and everything
+// else to the embedded operator UI. Health, readiness, and authentication
+// routes are registered before this catch-all so they stay reachable.
+func (s *Server) dispatch(api http.Handler) http.Handler {
+	protected := s.requireSession(s.requireCSRF(api))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isAPIPath(r.URL.Path) {
+			protected.ServeHTTP(w, r)
+			return
+		}
+		if s.Web == nil {
 			httpx.WriteProblem(w, r, apperr.NotFound("not_found", "no route for "+r.Method+" "+r.URL.Path))
 			return
 		}
+		s.Web.ServeHTTP(w, r)
+	})
+}
+
+var apiPrefixes = []string{
+	"/skus", "/inventory", "/orders", "/reconciliation",
+}
+
+func isAPIPath(path string) bool {
+	for _, prefix := range apiPrefixes {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
 	}
-	if s.Web == nil {
-		httpx.WriteProblem(w, r, apperr.NotFound("not_found", "no route for "+r.Method+" "+r.URL.Path))
-		return
-	}
-	s.Web.ServeHTTP(w, r)
+	return false
+}
+
+func (s *Server) handleAPIFallback(w http.ResponseWriter, r *http.Request) {
+	httpx.WriteProblem(w, r, apperr.NotFound("not_found", "no route for "+r.Method+" "+r.URL.Path))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +142,7 @@ func (s *Server) handleCreateSKU(w http.ResponseWriter, r *http.Request) {
 	sku, balance, err := s.Catalog.Create(r.Context(), catalog.CreateSKUInput{
 		Code:            request.Code,
 		Name:            request.Name,
-		Actor:           request.Actor,
+		Actor:           actorFrom(r.Context()),
 		OpeningQuantity: request.OpeningQuantity,
 		OpeningReason:   request.OpeningReason,
 	})
@@ -176,7 +204,7 @@ func (s *Server) handleReceive(w http.ResponseWriter, r *http.Request) {
 	result, err := s.Inventory.Receive(r.Context(), inventory.ReceiptInput{
 		SKUCode:  request.SKU,
 		Quantity: request.Quantity,
-		Actor:    request.Actor,
+		Actor:    actorFrom(r.Context()),
 		Reason:   request.Reason,
 	})
 	if err != nil {
@@ -234,7 +262,7 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	order, err := s.Orders.CreateOrder(r.Context(), orders.CreateOrderInput{
-		Scope: strings.TrimSpace(r.Header.Get("X-Caller-Scope")),
+		Scope: actorFrom(r.Context()),
 		Key:   strings.TrimSpace(r.Header.Get("Idempotency-Key")),
 		Lines: request.Lines,
 	})
@@ -285,7 +313,7 @@ func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	order, err := s.Orders.CancelOrder(r.Context(), id, orders.CancelInput{
-		Actor:  request.Actor,
+		Actor:  actorFrom(r.Context()),
 		Reason: request.Reason,
 	})
 	if err != nil {
@@ -325,7 +353,7 @@ func (s *Server) handleTransition(action string) http.HandlerFunc {
 				return
 			}
 		}
-		input := fulfilment.TransitionInput{Actor: request.Actor, Reason: request.Reason}
+		input := fulfilment.TransitionInput{Actor: actorFrom(r.Context()), Reason: request.Reason}
 		var (
 			order orders.Order
 			err   error
@@ -349,7 +377,7 @@ func (s *Server) handleTransition(action string) http.HandlerFunc {
 }
 
 func (s *Server) handleRunReconciliation(w http.ResponseWriter, r *http.Request) {
-	run, err := s.Reconciliation.Run(r.Context())
+	run, err := s.Reconciliation.Run(r.Context(), actorFrom(r.Context()))
 	if err != nil {
 		httpx.WriteError(w, r, s.Logger, err)
 		return

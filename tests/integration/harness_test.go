@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/oliaditya05/stockflow/internal/auth"
 	"github.com/oliaditya05/stockflow/internal/catalog"
 	"github.com/oliaditya05/stockflow/internal/fulfilment"
 	"github.com/oliaditya05/stockflow/internal/httpapi"
@@ -25,16 +26,44 @@ import (
 	"github.com/oliaditya05/stockflow/internal/platform/postgres"
 	"github.com/oliaditya05/stockflow/internal/reconciliation"
 	"github.com/oliaditya05/stockflow/migrations"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const defaultTestDatabaseURL = "postgres://stockflow:stockflow@localhost:5432/stockflow_test?sslmode=disable"
 
-var (
-	setupOnce sync.Once
-	setupErr  error
-	testPool  *pgxpool.Pool
-	testAPI   *httptest.Server
+const (
+	testOperatorUsername = "operator"
+	testOperatorPassword = "integration-test-password"
 )
+
+var (
+	setupOnce       sync.Once
+	setupErr        error
+	testPool        *pgxpool.Pool
+	testAPI         *httptest.Server
+	testAuthManager *auth.Manager
+	testCookie      string
+	testCSRF        string
+)
+
+// newTestServer builds the same application wiring used by cmd/api against the
+// shared test pool, with a caller-supplied session manager and login limiter.
+func newTestServer(pool *pgxpool.Pool, manager *auth.Manager, limiter *auth.LoginLimiter) *httptest.Server {
+	ledger := &inventory.Ledger{Pool: pool}
+	ordersRepo := &orders.Repository{Pool: pool}
+	server := &httpapi.Server{
+		Catalog:        &catalog.Service{Pool: pool, Repo: &catalog.Repository{Pool: pool}, Ledger: ledger},
+		Inventory:      &inventory.Service{Pool: pool, Ledger: ledger},
+		Orders:         &orders.Service{Pool: pool, Ledger: ledger, Repo: ordersRepo},
+		Fulfilment:     &fulfilment.Service{Pool: pool, Ledger: ledger, Repo: ordersRepo},
+		Reconciliation: &reconciliation.Service{Pool: pool},
+		Health:         pool.Ping,
+		Logger:         observability.NewLogger("error"),
+		Auth:           manager,
+		LoginLimiter:   limiter,
+	}
+	return httptest.NewServer(server.Handler())
+}
 
 func newAPI(t *testing.T) (*httptest.Server, *pgxpool.Pool) {
 	t.Helper()
@@ -67,23 +96,82 @@ func setup() {
 		return
 	}
 
-	ledger := &inventory.Ledger{Pool: pool}
-	catalogService := &catalog.Service{Pool: pool, Repo: &catalog.Repository{Pool: pool}, Ledger: ledger}
-	inventoryService := &inventory.Service{Pool: pool, Ledger: ledger}
-	ordersRepo := &orders.Repository{Pool: pool}
-	ordersService := &orders.Service{Pool: pool, Ledger: ledger, Repo: ordersRepo}
-
-	server := &httpapi.Server{
-		Catalog:        catalogService,
-		Inventory:      inventoryService,
-		Orders:         ordersService,
-		Fulfilment:     &fulfilment.Service{Pool: pool, Ledger: ledger, Repo: ordersRepo},
-		Reconciliation: &reconciliation.Service{Pool: pool},
-		Health:         pool.Ping,
-		Logger:         observability.NewLogger("error"),
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(testOperatorPassword), bcrypt.MinCost)
+	if err != nil {
+		setupErr = err
+		return
 	}
+	authConfig, err := auth.LoadConfig(func(key string) string {
+		switch key {
+		case "STOCKFLOW_OPERATOR_USERNAME":
+			return testOperatorUsername
+		case "STOCKFLOW_OPERATOR_PASSWORD_HASH":
+			return string(passwordHash)
+		case "STOCKFLOW_SESSION_SECRET":
+			return "integration-test-session-secret"
+		default:
+			return ""
+		}
+	})
+	if err != nil {
+		setupErr = err
+		return
+	}
+	authManager, err := auth.NewManager(authConfig)
+	if err != nil {
+		setupErr = err
+		return
+	}
+
 	testPool = pool
-	testAPI = httptest.NewServer(server.Handler())
+	testAuthManager = authManager
+	testAPI = newTestServer(pool, authManager, auth.NewLoginLimiter(1000, time.Minute))
+
+	if err := loginTestOperator(testAPI.URL); err != nil {
+		testAPI.Close()
+		setupErr = err
+		return
+	}
+}
+
+func loginTestOperator(baseURL string) error {
+	payload, err := json.Marshal(map[string]string{
+		"username": testOperatorUsername,
+		"password": testOperatorPassword,
+	})
+	if err != nil {
+		return err
+	}
+	response, err := http.Post(baseURL+"/auth/login", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		return fmt.Errorf("login status %d: %s", response.StatusCode, body)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return err
+	}
+	var session struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if err := json.Unmarshal(body, &session); err != nil {
+		return err
+	}
+	if session.CSRFToken == "" {
+		return fmt.Errorf("login did not return a csrf token")
+	}
+	testCSRF = session.CSRFToken
+	for _, cookie := range response.Cookies() {
+		testCookie = cookie.Name + "=" + cookie.Value
+	}
+	if testCookie == "" {
+		return fmt.Errorf("login did not set a session cookie")
+	}
+	return nil
 }
 
 type line struct {
@@ -131,7 +219,21 @@ type orderBody struct {
 	Items  []orderItemBody `json:"items"`
 }
 
+// doJSON issues an authenticated operator request: the session cookie and CSRF
+// token captured at login are attached automatically.
 func doJSON(t *testing.T, method, url string, payload any, headers map[string]string) (*http.Response, []byte) {
+	t.Helper()
+	return doJSONAs(t, method, url, payload, headers, true)
+}
+
+// doJSONNoAuth issues a request with no session cookie and no CSRF token, for
+// security tests.
+func doJSONNoAuth(t *testing.T, method, url string, payload any, headers map[string]string) (*http.Response, []byte) {
+	t.Helper()
+	return doJSONAs(t, method, url, payload, headers, false)
+}
+
+func doJSONAs(t *testing.T, method, url string, payload any, headers map[string]string, authenticated bool) (*http.Response, []byte) {
 	t.Helper()
 	var reader io.Reader
 	if payload != nil {
@@ -147,6 +249,12 @@ func doJSON(t *testing.T, method, url string, payload any, headers map[string]st
 	}
 	if payload != nil {
 		request.Header.Set("Content-Type", "application/json")
+	}
+	if authenticated {
+		request.Header.Set("Cookie", testCookie)
+		if method != http.MethodGet && method != http.MethodHead {
+			request.Header.Set("X-CSRF-Token", testCSRF)
+		}
 	}
 	for key, value := range headers {
 		request.Header.Set(key, value)
@@ -234,6 +342,7 @@ type findingBody struct {
 	ID        string `json:"id"`
 	CheckName string `json:"check_name"`
 	SKUID     string `json:"sku_id"`
+	OrderID   string `json:"order_id"`
 	Expected  string `json:"expected"`
 	Observed  string `json:"observed"`
 }

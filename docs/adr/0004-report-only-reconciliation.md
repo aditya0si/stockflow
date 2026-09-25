@@ -32,10 +32,13 @@ silently rewriting history, because silent repair would:
   see exactly what was wrong.
 - Checks implemented:
   `reserved_matches_active_reservations`,
+  `balance_matches_movement_ledger` (includes a missing balance row),
   `terminal_orders_have_no_active_reservation`,
-  `shipped_line_has_one_decrement`,
-  `manual_movement_has_actor_and_reason`, and
+  `shipped_line_has_one_matching_decrement` (matching order, item, SKU, and
+  quantity; V2), `manual_movement_has_actor_and_reason`, and
   `balance_values_respect_invariants`.
+- The audit actor for a run is the authenticated operator, not a hard-coded
+  string, so reconciliation is attributable like any other action.
 - A run's status is `clean` or `findings`; the finding count is stored.
 - `cmd/reconcile` exits `0` clean, `1` findings (unless
   `-fail-on-findings=false`), and `2` on an operational error.

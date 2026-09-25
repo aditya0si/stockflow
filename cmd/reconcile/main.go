@@ -42,7 +42,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	run, err := (&reconciliation.Service{Pool: pool}).Run(ctx)
+	run, err := (&reconciliation.Service{Pool: pool}).Run(ctx, "reconcile-cli")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "reconcile:", err)
 		os.Exit(2)

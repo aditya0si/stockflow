@@ -14,9 +14,12 @@ must not create two orders.
 
 ## Decision
 
-`POST /orders` requires `X-Caller-Scope` and `Idempotency-Key`. Inside the
-same transaction as the reservation, the service writes an
-`idempotency_records` row keyed by `unique (scope, key)` that stores:
+`POST /orders` requires `Idempotency-Key` and an authenticated session. The
+scope is derived from the authenticated operator identity (V2), not from a
+caller-supplied `X-Caller-Scope` header, so two operators cannot collide on a
+key or forge another's scope. Inside the same transaction as the reservation,
+the service writes an `idempotency_records` row keyed by `unique (scope, key)`
+that stores:
 
 - the canonical request hash,
 - state (`in_progress` or `completed`),

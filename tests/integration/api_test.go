@@ -19,21 +19,11 @@ func TestHealthEndpoints(t *testing.T) {
 	}
 }
 
-func TestCreateOrderHeaderValidation(t *testing.T) {
+func TestCreateOrderRequiresIdempotencyKey(t *testing.T) {
 	api, _ := newAPI(t)
 	_, code := createSKU(t, api, "validation", 1)
 
 	response, body := doJSON(t, http.MethodPost, api.URL+"/orders",
-		map[string]any{"lines": []line{{SKU: code, Quantity: 1}}},
-		map[string]string{"Idempotency-Key": "no-scope"})
-	if response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("missing scope: expected 400, got %d body %s", response.StatusCode, body)
-	}
-	if problem := decodeProblem(t, body); problem.Code != "missing_caller_scope" {
-		t.Fatalf("expected missing_caller_scope, got %q", problem.Code)
-	}
-
-	response, body = doJSON(t, http.MethodPost, api.URL+"/orders",
 		map[string]any{"lines": []line{{SKU: code, Quantity: 1}}},
 		map[string]string{"X-Caller-Scope": "checkout"})
 	if response.StatusCode != http.StatusBadRequest {

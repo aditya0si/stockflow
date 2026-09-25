@@ -104,8 +104,8 @@ func TestReconciliationRunReportsAllChecks(t *testing.T) {
 		t.Fatalf("reconciliation: status %d body %s", response.StatusCode, body)
 	}
 	run := decodeRun(t, body)
-	if run.ChecksRun != 5 {
-		t.Fatalf("expected 5 checks, got %d", run.ChecksRun)
+	if run.ChecksRun != 6 {
+		t.Fatalf("expected 6 checks, got %d", run.ChecksRun)
 	}
 	if run.Status != "clean" && run.Status != "findings" {
 		t.Fatalf("unexpected status %q", run.Status)

@@ -3,6 +3,7 @@ package fulfilment
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
@@ -22,9 +23,16 @@ type Service struct {
 
 type activeReservation struct {
 	id          uuid.UUID
+	orderID     uuid.UUID
 	orderItemID uuid.UUID
 	skuID       uuid.UUID
 	quantity    int
+}
+
+type orderItem struct {
+	id       uuid.UUID
+	skuID    uuid.UUID
+	quantity int
 }
 
 func (s *Service) Pick(ctx context.Context, orderID uuid.UUID, in TransitionInput) (orders.Order, error) {
@@ -59,8 +67,15 @@ func (s *Service) Ship(ctx context.Context, orderID uuid.UUID, in TransitionInpu
 		return orders.Order{}, orders.IllegalTransition(status, orders.StatusShipped)
 	}
 
-	reservations, err := lockActiveReservations(ctx, tx, orderID)
+	items, err := lockOrderItems(ctx, tx, orderID)
 	if err != nil {
+		return orders.Order{}, err
+	}
+	reservations, err := lockReservationsForOrder(ctx, tx, orderID)
+	if err != nil {
+		return orders.Order{}, err
+	}
+	if err := validateReservations(orderID, items, reservations); err != nil {
 		return orders.Order{}, err
 	}
 
@@ -228,12 +243,41 @@ func lockOrder(ctx context.Context, tx pgx.Tx, orderID uuid.UUID) (string, error
 	return status, nil
 }
 
-func lockActiveReservations(ctx context.Context, tx pgx.Tx, orderID uuid.UUID) ([]activeReservation, error) {
+func lockOrderItems(ctx context.Context, tx pgx.Tx, orderID uuid.UUID) ([]orderItem, error) {
 	rows, err := tx.Query(ctx, `
-		select id, order_item_id, sku_id, quantity
-		from reservations
-		where order_id = $1 and status = 'active'
+		select id, sku_id, quantity
+		from order_items
+		where order_id = $1
 		order by sku_id
+		for update`, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]orderItem, 0)
+	for rows.Next() {
+		var item orderItem
+		if err := rows.Scan(&item.id, &item.skuID, &item.quantity); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+// lockReservationsForOrder locks every active reservation that either names
+// this order or names one of its order items. Querying by item as well as order
+// lets validateReservations detect a reservation whose order_id disagrees with
+// the item it points at.
+func lockReservationsForOrder(ctx context.Context, tx pgx.Tx, orderID uuid.UUID) ([]activeReservation, error) {
+	rows, err := tx.Query(ctx, `
+		select id, order_id, order_item_id, sku_id, quantity
+		from reservations
+		where status = 'active'
+		  and (order_id = $1
+		       or order_item_id in (select id from order_items where order_id = $1))
+		order by order_item_id
 		for update`, orderID)
 	if err != nil {
 		return nil, err
@@ -243,12 +287,53 @@ func lockActiveReservations(ctx context.Context, tx pgx.Tx, orderID uuid.UUID) (
 	reservations := make([]activeReservation, 0)
 	for rows.Next() {
 		var reservation activeReservation
-		if err := rows.Scan(&reservation.id, &reservation.orderItemID, &reservation.skuID, &reservation.quantity); err != nil {
+		if err := rows.Scan(&reservation.id, &reservation.orderID, &reservation.orderItemID, &reservation.skuID, &reservation.quantity); err != nil {
 			return nil, err
 		}
 		reservations = append(reservations, reservation)
 	}
 	return reservations, rows.Err()
+}
+
+// validateReservations requires exactly one active reservation per order item,
+// with matching order, SKU, and quantity. A missing, duplicate, released,
+// altered, cross-order, or cross-SKU reservation is a stable conflict and the
+// caller must mutate nothing.
+func validateReservations(orderID uuid.UUID, items []orderItem, reservations []activeReservation) error {
+	byItem := make(map[uuid.UUID]activeReservation, len(reservations))
+	for _, reservation := range reservations {
+		if reservation.orderID != orderID {
+			return reservationConflict(orderID, "reservation %s belongs to order %s, not %s", reservation.id, reservation.orderID, orderID)
+		}
+		if _, duplicate := byItem[reservation.orderItemID]; duplicate {
+			return reservationConflict(orderID, "order item %s has more than one active reservation", reservation.orderItemID)
+		}
+		byItem[reservation.orderItemID] = reservation
+	}
+
+	if len(byItem) != len(items) {
+		return reservationConflict(orderID, "expected one active reservation per order item, got %d reservations for %d items", len(byItem), len(items))
+	}
+	for _, item := range items {
+		reservation, ok := byItem[item.id]
+		if !ok {
+			return reservationConflict(orderID, "order item %s has no active reservation", item.id)
+		}
+		if reservation.skuID != item.skuID {
+			return reservationConflict(orderID, "reservation %s has sku %s but order item %s has sku %s", reservation.id, reservation.skuID, item.id, item.skuID)
+		}
+		if reservation.quantity != item.quantity {
+			return reservationConflict(orderID, "reservation %s reserves %d but order item %s requires %d", reservation.id, reservation.quantity, item.id, item.quantity)
+		}
+	}
+	return nil
+}
+
+func reservationConflict(orderID uuid.UUID, format string, args ...any) *apperr.Error {
+	return apperr.
+		Conflict("reservation_inconsistent", "Order reservations are inconsistent",
+			fmt.Sprintf(format, args...)).
+		With("order_id", orderID.String())
 }
 
 func (s *Service) Events(ctx context.Context, orderID uuid.UUID) ([]Event, error) {

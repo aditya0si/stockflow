@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/oliaditya05/stockflow/internal/auth"
 	"github.com/oliaditya05/stockflow/internal/catalog"
 	"github.com/oliaditya05/stockflow/internal/fulfilment"
 	"github.com/oliaditya05/stockflow/internal/httpapi"
@@ -24,10 +26,38 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "healthcheck":
+			runHealthcheck()
+			return
+		case "hash-password":
+			runHashPassword()
+			return
+		case "new-secret":
+			runNewSecret()
+			return
+		}
+	}
+
 	logger := observability.NewLogger(env("LOG_LEVEL", "info"))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	authConfig, err := auth.LoadConfig(os.Getenv)
+	if err != nil {
+		logger.Error("authentication configuration", slog.Any("error", err))
+		os.Exit(1)
+	}
+	authManager, err := auth.NewManager(authConfig)
+	if err != nil {
+		logger.Error("authentication manager", slog.Any("error", err))
+		os.Exit(1)
+	}
+	if authConfig.DemoMode {
+		logger.Warn("STOCKFLOW_DEMO_MODE is enabled: demo defaults are in use and Secure cookies are disabled")
+	}
 
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
@@ -74,6 +104,8 @@ func main() {
 		Web:            webui.Handler(),
 		Health:         pool.Ping,
 		Logger:         logger,
+		Auth:           authManager,
+		LoginLimiter:   auth.NewLoginLimiter(envInt("STOCKFLOW_LOGIN_MAX_ATTEMPTS", 10), time.Minute),
 	}
 
 	httpServer := &http.Server{
@@ -100,6 +132,55 @@ func main() {
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", slog.Any("error", err))
+	}
+}
+
+// runHashPassword prints a bcrypt hash for the given password (argument or
+// STOCKFLOW_OPERATOR_PASSWORD) so only the hash needs to live in configuration.
+func runHashPassword() {
+	password := ""
+	if len(os.Args) > 2 {
+		password = os.Args[2]
+	}
+	if password == "" {
+		password = os.Getenv("STOCKFLOW_OPERATOR_PASSWORD")
+	}
+	if password == "" {
+		fmt.Fprintln(os.Stderr, "usage: stockflow-api hash-password <password>  (or set STOCKFLOW_OPERATOR_PASSWORD)")
+		os.Exit(2)
+	}
+	hash, err := auth.GeneratePasswordHash(password)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "hash-password:", err)
+		os.Exit(1)
+	}
+	fmt.Println(hash)
+}
+
+// runNewSecret prints a random value for STOCKFLOW_SESSION_SECRET.
+func runNewSecret() {
+	secret, err := auth.NewRandomSecret()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "new-secret:", err)
+		os.Exit(1)
+	}
+	fmt.Println(secret)
+}
+
+// runHealthcheck performs an in-process liveness probe so a distroless image
+// without a shell or HTTP client can still be health-checked by Compose.
+func runHealthcheck() {
+	url := env("STOCKFLOW_HEALTHCHECK_URL", "http://127.0.0.1:8080/healthz")
+	client := &http.Client{Timeout: 3 * time.Second}
+	response, err := client.Get(url)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "healthcheck:", err)
+		os.Exit(1)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		fmt.Fprintln(os.Stderr, "healthcheck: status", response.StatusCode)
+		os.Exit(1)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/oliaditya05/stockflow/internal/auth"
 	"github.com/oliaditya05/stockflow/internal/catalog"
 	"github.com/oliaditya05/stockflow/internal/fulfilment"
 	"github.com/oliaditya05/stockflow/internal/httpapi"
@@ -29,10 +30,17 @@ import (
 	"github.com/oliaditya05/stockflow/migrations"
 )
 
+const (
+	demoUsername = "operator"
+	demoPassword = "stockflow-demo"
+)
+
 type demo struct {
 	pool           *pgxpool.Pool
 	api            *httptest.Server
 	reconciliation *reconciliation.Service
+	cookie         string
+	csrf           string
 	step           int
 }
 
@@ -67,6 +75,23 @@ func main() {
 		os.Exit(2)
 	}
 
+	demoEnv := func(key string) string {
+		if key == "STOCKFLOW_DEMO_MODE" {
+			return "true"
+		}
+		return os.Getenv(key)
+	}
+	authConfig, err := auth.LoadConfig(demoEnv)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "auth config:", err)
+		os.Exit(2)
+	}
+	authManager, err := auth.NewManager(authConfig)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "auth manager:", err)
+		os.Exit(2)
+	}
+
 	ledger := &inventory.Ledger{Pool: pool}
 	repo := &orders.Repository{Pool: pool}
 	server := &httpapi.Server{
@@ -77,13 +102,29 @@ func main() {
 		Reconciliation: &reconciliation.Service{Pool: pool},
 		Health:         pool.Ping,
 		Logger:         observability.NewLogger("error"),
+		Auth:           authManager,
 	}
 	api := httptest.NewServer(server.Handler())
 	defer api.Close()
 
 	d := &demo{pool: pool, api: api, reconciliation: server.Reconciliation}
+	d.login()
 	d.run(ctx)
-	fmt.Println("\nDEMO PASSED: all V1 assertions held")
+	fmt.Println("\nDEMO PASSED: all assertions held")
+}
+
+func (d *demo) login() {
+	status, body := d.request(http.MethodPost, "/auth/login", map[string]any{
+		"username": demoUsername, "password": demoPassword,
+	}, nil)
+	d.must(status == http.StatusOK, "login status %d: %s", status, body)
+	var session struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	d.decode(body, &session)
+	d.csrf = session.CSRFToken
+	d.must(d.csrf != "", "login did not return a csrf token")
+	d.must(d.cookie != "", "login did not set a session cookie")
 }
 
 func (d *demo) run(ctx context.Context) {
@@ -293,7 +334,7 @@ func (d *demo) stepReconciliation(ctx context.Context) {
 		d.fail("inject discrepancy: %v", err)
 	}
 
-	run, err := d.reconciliation.Run(ctx)
+	run, err := d.reconciliation.Run(ctx, "demo-operator")
 	d.must(err == nil, "run reconciliation: %v", err)
 	d.must(run.Status == reconciliation.StatusFindings, "expected findings status, got %q", run.Status)
 
@@ -374,11 +415,20 @@ func (d *demo) request(method, path string, payload any, headers map[string]stri
 	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
+	if d.cookie != "" {
+		request.Header.Set("Cookie", d.cookie)
+	}
+	if d.csrf != "" && method != http.MethodGet {
+		request.Header.Set("X-CSRF-Token", d.csrf)
+	}
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		d.fail("http %s %s: %v", method, path, err)
 	}
 	defer response.Body.Close()
+	for _, cookie := range response.Cookies() {
+		d.cookie = cookie.Name + "=" + cookie.Value
+	}
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
 		d.fail("read response: %v", err)
