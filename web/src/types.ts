@@ -18,6 +18,12 @@ export interface OrderItem {
 
 export type OrderStatus = 'accepted' | 'picking' | 'packed' | 'shipped' | 'cancelled'
 
+export interface OrderDetail {
+  order: Order
+  events: FulfilmentEvent[]
+  movements: Movement[]
+}
+
 export interface Order {
   id: string
   status: OrderStatus
@@ -69,6 +75,14 @@ export interface ReconciliationRun {
   started_at: string
   finished_at: string
   findings?: Finding[] | null
+}
+
+export interface Session {
+  authenticated: boolean
+  username?: string
+  csrf_token?: string
+  expires_at?: string
+  demo_mode?: boolean
 }
 
 export interface Problem {

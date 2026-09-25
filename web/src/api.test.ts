@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, api, errorMessage } from './api'
+import { ApiError, api, errorMessage, setCSRFToken } from './api'
 
 function jsonResponse(status: number, body: unknown) {
   return {
@@ -12,6 +12,7 @@ function jsonResponse(status: number, body: unknown) {
 describe('api client', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
+    setCSRFToken('')
   })
 
   it('lists balances from the inventory endpoint', async () => {
@@ -38,22 +39,28 @@ describe('api client', () => {
     expect(balances[0].available).toBe(3)
     expect(fetchMock).toHaveBeenCalledWith(
       '/inventory/balances',
-      expect.objectContaining({ method: 'GET' }),
+      expect.objectContaining({ method: 'GET', credentials: 'same-origin' }),
     )
   })
 
-  it('sends caller scope and idempotency key when creating an order', async () => {
+  it('learns the CSRF token from login and echoes it on mutations', async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValue(jsonResponse(201, { id: 'order-1', status: 'accepted' }))
+      .mockResolvedValueOnce(jsonResponse(200, { authenticated: true, csrf_token: 'token-1' }))
+      .mockResolvedValueOnce(jsonResponse(201, { id: 'order-1', status: 'accepted' }))
     vi.stubGlobal('fetch', fetchMock)
 
-    const order = await api.createOrder('operator', 'key-123', [{ sku: 'DEMO-TEE', quantity: 1 }])
+    await api.login('operator', 'secret')
+    const order = await api.createOrder('key-123', [{ sku: 'DEMO-TEE', quantity: 1 }])
 
     expect(order.id).toBe('order-1')
-    const [, options] = fetchMock.mock.calls[0]
-    expect(options.headers['X-Caller-Scope']).toBe('operator')
-    expect(options.headers['Idempotency-Key']).toBe('key-123')
+    const [, loginOptions] = fetchMock.mock.calls[0]
+    expect(loginOptions.credentials).toBe('same-origin')
+
+    const [, orderOptions] = fetchMock.mock.calls[1]
+    expect(orderOptions.headers['Idempotency-Key']).toBe('key-123')
+    expect(orderOptions.headers['X-CSRF-Token']).toBe('token-1')
+    expect(orderOptions.headers['X-Caller-Scope']).toBeUndefined()
   })
 
   it('surfaces RFC 9457 problems as ApiError', async () => {
@@ -68,7 +75,7 @@ describe('api client', () => {
       ),
     )
 
-    await expect(api.cancelOrder('order-1', 'operator', 'too late')).rejects.toMatchObject({
+    await expect(api.cancelOrder('order-1', 'too late')).rejects.toMatchObject({
       name: 'ApiError',
       status: 409,
       code: 'illegal_transition',

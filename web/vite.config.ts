@@ -12,7 +12,7 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '^/(skus|inventory|orders|reconciliation|healthz|readyz)': 'http://localhost:8080',
+      '^/(skus|inventory|orders|reconciliation|auth|healthz|readyz)': 'http://localhost:8080',
     },
   },
   test: {
@@ -20,5 +20,7 @@ export default defineConfig({
     globals: true,
     setupFiles: './src/setupTests.ts',
     css: false,
+    // Playwright specs live in e2e/ and are run by Playwright, not Vitest.
+    exclude: ['e2e/**', 'node_modules/**'],
   },
 })
