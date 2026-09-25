@@ -57,4 +57,4 @@ Acquisition logic:
 - The stored response is a capture of the committed outcome. If the response
   schema changes, old records still replay the bytes that were returned
   originally. This is intentional: the promise is a stable committed outcome,
-  not "exactly-once delivery."
+  not a delivery guarantee.

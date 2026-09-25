@@ -67,7 +67,7 @@ One process and one database are the deployable architecture. Polling is suffici
 A reservation crosses inventory and ordering in one transaction. Network boundaries would create distributed failure without a demonstrated scaling need. Module boundaries live in code and tests.
 
 ### Idempotency
-Store caller scope, key, canonical request hash, state, and the definitive response. Same key/same payload returns the original outcome; same key/different payload returns `409`. This promises a stable committed API outcome, not “exactly-once delivery.”
+Store caller scope, key, canonical request hash, state, and the definitive response. Same key/same payload returns the original outcome; same key/different payload returns `409`. This promises a stable committed API outcome, not a delivery guarantee.
 
 ## F. Deep engineering areas
 
@@ -168,7 +168,7 @@ Structured errors/logging, correlation IDs, pagination/indexes, actor/reason aud
 One V3 extension, hosted demo, generated API docs kept in sync.
 
 ### DO NOT BUILD
-Storefront, payments, multiple warehouses, allocation strategies, Redis inventory, Kafka/Redpanda, microservices, Kubernetes, offline writes, AI, fake operational dashboards, “exactly once,” or synthetic global-scale claims.
+Storefront, payments, multiple warehouses, allocation strategies, Redis inventory, Kafka/Redpanda, microservices, Kubernetes, offline writes, AI, fake operational dashboards, delivery-guarantee claims beyond the documented idempotency contract, or synthetic global-scale claims.
 
 ## N. Known limitations
 

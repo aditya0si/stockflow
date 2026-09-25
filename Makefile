@@ -1,7 +1,7 @@
 DB_URL ?= postgres://stockflow:stockflow@localhost:5432/stockflow?sslmode=disable
 TEST_DB_URL ?= postgres://stockflow:stockflow@localhost:5432/stockflow_test?sslmode=disable
 
-.PHONY: help up down logs db-up run seed reset fmt vet tidy test test-unit test-integration build
+.PHONY: help up down logs db-up run seed reset fmt vet tidy test test-unit test-integration test-race build
 
 help:
 	@echo "up               build and start app + postgres with docker compose"
@@ -13,7 +13,8 @@ help:
 	@echo "fmt              gofmt all tracked Go files"
 	@echo "vet              run go vet"
 	@echo "test-unit        run unit tests"
-	@echo "test-integration run PostgreSQL integration tests (starts postgres)"
+	@echo "test-integration run PostgreSQL integration tests (starts postgres; fails if the test DB is unreachable)"
+	@echo "test-race        run all tests with the race detector (starts postgres; requires a C toolchain)"
 	@echo "test             run unit and integration tests"
 	@echo "build            build api and seed binaries into bin/"
 
@@ -53,6 +54,9 @@ test-unit:
 
 test-integration: db-up
 	STOCKFLOW_TEST_DATABASE_URL=$(TEST_DB_URL) go test -count=1 ./tests/...
+
+test-race: db-up
+	STOCKFLOW_TEST_DATABASE_URL=$(TEST_DB_URL) go test -race -count=1 ./...
 
 test: test-unit test-integration
 

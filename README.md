@@ -21,7 +21,7 @@ A Go modular monolith (standard library HTTP, `pgx` PostgreSQL driver) with:
 | Stock receipts (positive quantity, actor, reason) | yes |
 | `POST /orders` with canonical hashing and atomic multi-SKU reservation | yes |
 | Payload-aware idempotency (`Idempotency-Key` + `X-Caller-Scope`) | yes |
-| `POST /orders/{id}/cancel` releasing active reservations once | yes |
+| `POST /orders/{id}/cancel` replay-safe release of active reservations | yes |
 | Read endpoints for SKUs, balance, order, movement history | yes |
 | Immutable append-only movement ledger | yes (DB trigger) |
 | RFC 9457 `application/problem+json` errors | yes |
@@ -120,36 +120,50 @@ curl -s "localhost:8080/inventory/movements?sku_id=<sku-id>"
 
 ## Tests
 
-The five critical V0 tests and the API contract tests run against **real
-PostgreSQL**; no mocks are used for reservation correctness.
+Every test that touches reservation correctness runs against **real
+PostgreSQL**; no mocks are used for concurrency claims. `go test ./...`
+**requires** the Compose test database: if it cannot be reached the integration
+suite fails hard instead of skipping, so a green run always means the real
+database was exercised.
 
 ```sh
 docker compose up -d postgres        # or: make db-up
 STOCKFLOW_TEST_DATABASE_URL='postgres://stockflow:stockflow@localhost:5432/stockflow_test?sslmode=disable' \
-  go test -count=1 ./tests/...
-go test ./internal/...
+  go test ./...
 go vet ./...
 ```
 
-If `STOCKFLOW_TEST_DATABASE_URL` is unset the integration suite skips with a
-clear message; it never pretends to have run.
+`STOCKFLOW_TEST_DATABASE_URL` defaults to that Compose test database, so with
+the container running `go test ./...` needs no extra environment.
 
 What the critical tests prove:
 
-1. `TestOneUnitFiftyBuyers` — fifty concurrent orders for one unit yield exactly
-   one `201` and no negative balance.
+1. `TestOneUnitFiftyBuyers` — fifty concurrent orders for one unit yield a
+   single `201`; the persisted order, item, reservation, and movement match
+   that response and no balance goes negative.
 2. `TestIdempotentRetryReturnsOriginalOrder` — same key and body replays the
    original order without a second reservation.
 3. `TestIdempotencyPayloadConflict` — same key, changed body returns `409` and
    mutates nothing.
-4. `TestMultiSKURollback` — one unavailable line rolls back every order,
-   reservation, and movement write.
-5. `TestRepeatedCancellationReleasesOnce` — cancelling twice releases stock
-   exactly once.
+4. `TestMultiSKURollback` — one unavailable line rolls back the order row,
+   items, reservations, movements, and the idempotency record.
+5. `TestRepeatedCancellationReleasesOnce` — cancelling twice is replay-safe:
+   the release movement is persisted once and no active reservation remains.
 
-Additional coverage: concurrent same-key requests collapse to one order, the
-movement ledger rejects `UPDATE`/`DELETE`, duplicate lines are normalized, and
-problem responses use the documented codes.
+Additional coverage: concurrent same-key requests collapse to one order;
+opposite-direction multi-SKU contention (`[A,B]` versus `[B,A]`) leaves durable
+balances, orders, items, and reservation counts correct with no partial writes;
+concurrent cancellation of one order produces coherent responses and releases
+stock once; the movement ledger rejects `UPDATE`/`DELETE`; duplicate lines are
+normalized; and problem responses use the documented codes.
+
+### Race detector
+
+`go test -race` requires a C toolchain. On Windows the race detector may be
+unavailable with the local MinGW GCC toolchain, so a local Windows `-race`
+build failure is a toolchain limitation rather than a test result. CI runs
+`go test -race ./...` against the Compose database on Linux; the race detector
+is never silently omitted.
 
 ## Transaction strategy
 

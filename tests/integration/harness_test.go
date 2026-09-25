@@ -38,7 +38,9 @@ func newAPI(t *testing.T) (*httptest.Server, *pgxpool.Pool) {
 	t.Helper()
 	setupOnce.Do(setup)
 	if setupErr != nil {
-		t.Skipf("postgres integration tests unavailable: %v", setupErr)
+		t.Fatalf("postgres integration test database unavailable: %v\n"+
+			"start it with `docker compose up -d postgres` or set STOCKFLOW_TEST_DATABASE_URL; "+
+			"`go test ./...` requires the real PostgreSQL test database", setupErr)
 	}
 	return testAPI, testPool
 }
