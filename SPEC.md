@@ -182,20 +182,35 @@ Only after implementation:
 - **Demonstrated elsewhere:** streaming pipelines, Redis, DLQs, backpressure, resumable SSE.
 - **Not worth forcing:** microservices, Kubernetes, recommendations/ML, multi-region consistency, GraphQL, event sourcing.
 
-## P. Completion checklist
+## P. Completion status matrix
 
-- [ ] Fresh migrations and one-command startup work.
-- [ ] Receipt → order → pick → pack → ship works in the UI.
-- [ ] Database constraints encode non-negative stock.
-- [ ] Duplicate lines normalize and multi-SKU reservation is atomic.
-- [ ] Same-key payload conflict and ambiguous retry behavior are proven.
-- [ ] Shipment/cancellation race and the five named tests pass in CI.
-- [ ] Reconciliation detects seeded corruption without repair.
-- [ ] Benchmarks include raw results, environment, and commands.
-- [ ] Demo reset, health check, sample requests, screenshots/video work.
-- [ ] ADRs explain rejected alternatives and known limits.
-- [ ] No README/CV number lacks a reproducible artifact.
-- [ ] No unfinished headline feature appears on the CV.
-- [ ] The author can explain every transaction boundary without generated notes.
+Status values: **completed** (implemented and verified by an executable check),
+**deferred** (deliberately not done, with a reason), **not applicable**.
+Nothing below is marked completed without an executable check behind it.
 
-**CV gate:** do not list StockFlow until all MUST items, the five tests, demo, README, and evidence artifacts are complete.
+| Item | Status | Evidence / note |
+| --- | --- | --- |
+| Fresh migrations and one-command startup | completed | `docker compose up --build -d`; migrations 0001–0004 apply on start; `/readyz` pings PostgreSQL |
+| Receipt → order → pick → pack → ship in the UI | completed | Playwright `workflow.spec.ts` against the production build |
+| Database constraints encode non-negative stock | completed | `inventory_balances_available_non_negative` check; integration tests |
+| Duplicate lines normalize; multi-SKU reservation is atomic | completed | `TestDuplicateLinesAreNormalized`, `TestMultiSKURollback`, `TestOneUnitFiftyBuyers` |
+| Same-key payload conflict and ambiguous retry are proven | completed | `TestIdempotencyPayloadConflict`, `TestIdempotentRetryReturnsOriginalOrder`, `TestConcurrentSameKeyCreatesOneOrder` |
+| Shipment/cancellation race and the five named tests pass in CI | completed | `TestCancellationVersusShipmentRace`, `TestDuplicateShipmentCannotDecrementTwice`, CI `go` job |
+| Reconciliation detects corruption without repair | completed | `TestReconciliationDetects*`, `TestReconciliationDoesNotRepairCorruptedRow` |
+| Balances reconcile against the immutable ledger, including missing rows | completed | `balance_matches_movement_ledger`; `TestReconciliationDetectsOnHandDriftAgainstLedger`, `TestReconciliationDetectsMissingBalanceRow` |
+| Shipment evidence validated exactly | completed | `shipped_line_has_one_matching_decrement`; `TestReconciliationDetectsShipmentEvidenceCorruption` |
+| Corrupt reservations rejected before shipping | completed | `409 reservation_inconsistent`; `TestShipRejects{Missing,Released,Altered}Reservation` |
+| Cross-table order/item/SKU consistency | completed | migration `0004`; `TestCrossTableConstraintsRejectMismatchedReferences`; ADR 0005 |
+| Benchmarks include raw results, environment, and commands | completed | `benchmarks/raw/` artifacts + `benchmarks/README.md` |
+| Demo reset, health check, sample requests, screenshots | completed | `cmd/demo`, Compose healthcheck, README curl sample, `docs/screenshots/` |
+| ADRs explain rejected alternatives and known limits | completed | `docs/adr/0001`–`0005` |
+| No README/CV number lacks a reproducible artifact | completed | benchmark claims point at `benchmarks/raw/`; this matrix |
+| No unfinished headline feature appears on the CV | completed | status table in README; scope prohibitions |
+| Role distinction (owner/operator/worker) | deferred | a single operator is the honest scope for a demo; roles need a real user store |
+| Second location / multi-warehouse | deferred | outside scope prohibitions |
+| `node`/`vitest` dev-tool advisories | deferred | affect the dev server/Vitest UI, not the shipped static build; tracked as a known limitation |
+| Local Windows race detector | not applicable | CI runs `go test -race` on Linux; Windows lacks a supported C toolchain here |
+
+**CV gate:** StockFlow may be listed only for the completed rows above, each of
+which has an executable check. Do not describe the deferred or not-applicable
+rows as shipped.

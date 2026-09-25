@@ -86,3 +86,60 @@ jobs:
 
       - name: build
         run: npm run build
+
+  e2e:
+    name: docker build, compose, playwright + axe
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build and start the production stack
+        run: docker compose up -d --build
+
+      - name: wait for application readiness
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/readyz >/dev/null; then
+              echo "application ready after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "application did not become ready"
+          docker compose logs
+          exit 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: install web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: install Playwright browser
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: Playwright and axe (fails on browser console/page/request errors)
+        working-directory: web
+        run: npx playwright test
+
+      - name: upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report
+          if-no-files-found: ignore
+
+      - name: compose logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: stop the stack
+        if: always()
+        run: docker compose down -v

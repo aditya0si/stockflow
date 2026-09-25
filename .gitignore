@@ -9,5 +9,11 @@ coverage.out
 # tracked.
 web/node_modules/
 web/coverage/
+web/test-results/
+web/playwright-report/
 /internal/webui/dist/*
 !/internal/webui/dist/.gitkeep
+
+# Local backup dumps and benchmark scratch output.
+/backups/
+/benchmarks/raw/*.tmp

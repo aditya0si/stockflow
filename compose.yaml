@@ -1,6 +1,7 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # postgres:16-alpine, pinned by digest (see Dockerfile for the refresh note).
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
     environment:
       POSTGRES_USER: stockflow
       POSTGRES_PASSWORD: stockflow
@@ -23,8 +24,23 @@ services:
       HTTP_ADDR: ":8080"
       LOG_LEVEL: info
       MIGRATE_ON_START: "true"
+      # Explicit demo mode: the operator credential and session key fall back to
+      # documented, non-secret defaults (operator / stockflow-demo, see README)
+      # and the cookie is not Secure so the local http demo works. No password
+      # is stored in this file. A production deployment must set
+      # STOCKFLOW_OPERATOR_USERNAME, STOCKFLOW_OPERATOR_PASSWORD_HASH (bcrypt),
+      # and STOCKFLOW_SESSION_SECRET instead, or startup fails.
+      STOCKFLOW_DEMO_MODE: "true"
+      STOCKFLOW_OPERATOR_USERNAME: "operator"
+      STOCKFLOW_LOGIN_MAX_ATTEMPTS: "20"
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD", "/stockflow-api", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
     depends_on:
       postgres:
         condition: service_healthy

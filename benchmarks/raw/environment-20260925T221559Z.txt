@@ -1,0 +1,7 @@
+timestamp_utc: 20260925T221559Z
+os: MINGW64_NT-10.0-26200 Aditya 3.6.6-1cdd4371.x86_64 2026-01-15 22:20 UTC x86_64 Msys
+go: go version go1.27.0 windows/amd64
+docker_server: 29.6.2
+postgres_image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+cpu: 13th Gen Intel(R) Core(TM) i7-13620H
+database_url: postgres://stockflow:stockflow@localhost:5432/stockflow_test?sslmode=disable

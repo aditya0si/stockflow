@@ -5,6 +5,7 @@ DEMO_DB_URL ?= postgres://stockflow:stockflow@localhost:5432/stockflow_test?sslm
 .PHONY: help up down logs db-up run seed reset fmt vet tidy \
 	test test-unit test-integration test-race \
 	web-install web-format-check web-typecheck web-test web-build \
+	e2e-install e2e backup restore-test bench \
 	demo reconcile verify build
 
 help:
@@ -25,6 +26,11 @@ help:
 	@echo "web-typecheck    tsc --noEmit for the operator UI"
 	@echo "web-test         vitest run for the operator UI"
 	@echo "web-build        build the operator UI into internal/webui/dist"
+	@echo "e2e-install      install the Playwright chromium browser"
+	@echo "e2e              run Playwright + axe against the running Compose stack"
+	@echo "backup           dump the local Compose database to backups/"
+	@echo "restore-test     exercised backup/restore rehearsal against the test database"
+	@echo "bench            run the reproducible benchmarks into benchmarks/raw/"
 	@echo "demo             run the deterministic assertion demo against DEMO_DB_URL"
 	@echo "reconcile        run the report-only reconciliation command once"
 	@echo "verify           unit + integration + web checks + demo"
@@ -86,6 +92,21 @@ web-test:
 
 web-build:
 	cd web && npm run build
+
+e2e-install:
+	cd web && npx playwright install chromium
+
+e2e:
+	cd web && npm run e2e
+
+backup:
+	bash scripts/backup.sh
+
+restore-test:
+	bash scripts/backup-restore-test.sh
+
+bench:
+	bash benchmarks/run.sh
 
 demo: db-up web-build
 	STOCKFLOW_ALLOW_DEMO_FIXTURES=true STOCKFLOW_DEMO_DATABASE_URL=$(DEMO_DB_URL) go run ./cmd/demo
