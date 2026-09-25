@@ -17,3 +17,6 @@ web/playwright-report/
 # Local backup dumps and benchmark scratch output.
 /backups/
 /benchmarks/raw/*.tmp
+
+# CI step output (e.g. the uploaded backup/restore rehearsal log).
+/artifacts/

@@ -1,0 +1,37 @@
+# Normalize line endings so a Windows checkout matches the repository bytes.
+# Source, config, docs, and shell scripts are stored and checked out with LF;
+# binary assets are never line-ending translated. Keep this list in step with
+# the file types that formatting checks (gofmt, Prettier) consume.
+* text=auto eol=lf
+
+*.go      text eol=lf
+*.mod     text eol=lf
+*.sum     text eol=lf
+*.sh      text eol=lf
+*.sql     text eol=lf
+*.md      text eol=lf
+*.json    text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.ts      text eol=lf
+*.tsx     text eol=lf
+*.js      text eol=lf
+*.css     text eol=lf
+*.html    text eol=lf
+*.txt     text eol=lf
+*.example text eol=lf
+
+Dockerfile      text eol=lf
+Makefile        text eol=lf
+.dockerignore   text eol=lf
+.editorconfig   text eol=lf
+.gitattributes  text eol=lf
+.gitignore      text eol=lf
+
+# Binary assets: Git must not attempt text conversion or diff.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary

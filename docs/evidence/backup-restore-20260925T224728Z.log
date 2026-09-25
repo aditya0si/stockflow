@@ -1,0 +1,29 @@
+# backup/restore rehearsal — raw log
+timestamp_utc: 20260925T224728Z
+host_os: MINGW64_NT-10.0-26200 Aditya 3.6.6-1cdd4371.x86_64 2026-01-15 22:20 UTC x86_64 Msys
+go: go version go1.27.0 windows/amd64
+docker_server: 29.6.2
+postgres_image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+command: scripts/backup-restore-test.sh   (docker mode, default)
+
+--- raw output ---
+== starting postgres ==
+ Container stockflow-postgres-1 Running 
+== seeding stockflow_test ==
+== dumping stockflow_test ==
+== restoring into stockflow_restore_test ==
+NOTICE:  database "stockflow_restore_test" does not exist, skipping
+== comparing row counts ==
+ok skus=3
+ok inventory_balances=3
+ok inventory_movements=2
+ok orders=0
+ok order_items=0
+ok reservations=0
+ok idempotency_records=0
+ok fulfilment_events=0
+ok audit_entries=0
+ok reconciliation_runs=0
+ok reconciliation_findings=0
+BACKUP/RESTORE REHEARSAL PASSED
+exit_code: 0

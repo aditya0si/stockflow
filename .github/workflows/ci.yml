@@ -55,6 +55,28 @@ jobs:
       - name: race detector
         run: go test -race -count=1 ./...
 
+      - name: backup/restore rehearsal
+        if: always()
+        env:
+          STOCKFLOW_BACKUP_DIRECT: "1"
+          STOCKFLOW_BACKUP_DB: stockflow_test
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: stockflow
+          PGPASSWORD: stockflow
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          bash scripts/backup-restore-test.sh 2>&1 | tee artifacts/backup-restore-rehearsal.log
+
+      - name: upload backup/restore rehearsal log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-restore-rehearsal-log
+          path: artifacts/backup-restore-rehearsal.log
+          if-no-files-found: error
+
   web:
     name: format, typecheck, test, build
     runs-on: ubuntu-latest

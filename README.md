@@ -18,12 +18,16 @@ reconciliation behaviour inspectable and provable against real PostgreSQL.
 | --- | --- |
 | V0 — executable domain spike | done |
 | V1 — useful product (UI, fulfilment, idempotency, reconciliation, demo) | done |
-| V2 — measured hardening (security boundary, cross-table constraints, browser E2E/axe, backup rehearsal, benchmarks) | done |
+| V2 — measured hardening (auth boundary, cross-table constraints, browser E2E/axe, backup rehearsal, benchmarks; role distinction explicitly descoped) | done |
 | V3 — one evidence-driven extension | not started (see scope prohibitions) |
 
 "Done" here means the code, migrations, and tests exist and the checks in
-[Verification](#verification) were run against real PostgreSQL. See
-`SPEC.md` for the item-by-item status matrix and remaining limitations.
+[Verification](#verification) were run locally against real PostgreSQL. See
+`SPEC.md` for the item-by-item status matrix, and
+[`docs/release-evidence.md`](docs/release-evidence.md) for the exact commands,
+raw outputs, and artifacts from the freeze run. The Linux CI workflow is
+configured but has **not** yet been observed on a remote CI run; no CI badge or
+remote pass is claimed.
 
 ## What it is
 
@@ -413,9 +417,10 @@ STOCKFLOW_CAPTURE_SCREENSHOTS=true npx playwright test screenshots
 
 `go test -race` requires a C toolchain. On Windows the race detector may be
 unavailable with a local MinGW GCC toolchain, so a local Windows `-race` build
-failure is a toolchain limitation rather than a test result. CI runs
-`go test -race ./...` against the Compose database on Linux; the race detector
-is never silently omitted.
+failure is a toolchain limitation rather than a test result. Linux CI **is
+configured** to run `go test -race ./...` against PostgreSQL; that workflow has
+not yet been observed on a remote CI run, so no remote race result is claimed
+here. The race detector is never silently omitted from the CI configuration.
 
 ## Backup, restore, and benchmarks
 
@@ -476,8 +481,9 @@ See `docs/adr/0001-atomic-reservation-locking.md`,
 
 ## Verification
 
-The exact checks run for this release, and their results, are reported in the
-completion report accompanying the final commit. In short:
+The exact checks run for this release, their commands, and their raw results
+are recorded in [`docs/release-evidence.md`](docs/release-evidence.md). In
+short:
 
 ```sh
 gofmt -l .
@@ -510,9 +516,16 @@ benchmarks/run.sh
   truth to fail over to.
 - Reconciliation detects only the modelled checks above; it is not a general
   accounting system.
-- The frontend dev toolchain (`vite`/`vitest`) currently reports known
-  advisories that affect the development server and Vitest UI, not the static
-  production build shipped in the image.
+- The frontend dev toolchain reports `npm audit` findings at freeze time: **5
+  dev-toolchain advisories (3 moderate, 1 high, 1 critical)** across `vitest`,
+  `vite`, `vite-node`, `@vitest/mocker`, and `esbuild`. They affect the Vite dev
+  server, the Vitest UI, and the esbuild dev-server transform path, which are
+  `devDependencies` used only for local/CI testing and builds; the shipped
+  artifact is a static bundle embedded in a distroless Go image with no Node
+  runtime and no dev server. This is **not** a claim that the advisories are
+  harmless. The exact advisories, scope, and the gated upgrade acceptance checks
+  are in
+  [`docs/dependency-upgrade-plan.md`](docs/dependency-upgrade-plan.md).
 - No metrics dashboards, analytics, or adoption claims are made or implied.
 
 ### Scope prohibitions
@@ -533,7 +546,7 @@ stockflow/
 ├── benchmarks/{hot_sku,reconcile,raw}/
 ├── scripts/
 ├── deploy/postgres/
-├── docs/{adr,screenshots,security.md,operations.md}
+├── docs/{adr,evidence,screenshots,operations.md,security.md,release-evidence.md,dependency-upgrade-plan.md}
 ├── compose.yaml
 ├── Dockerfile
 ├── Makefile

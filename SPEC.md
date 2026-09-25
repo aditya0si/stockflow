@@ -91,8 +91,16 @@ Schema, migrations, receipts, atomic reservation, cancellation, HTTP/CLI, and re
 ### V1 — useful product
 Operator UI, SKU/stock administration, pick-pack-ship, payload-aware idempotency, movement history, reconciliation, deterministic seed, CI, and one-command startup. Exit: a new reviewer completes the documented workflow.
 
-### V2 — measured hardening
-Role distinction, indexed/paginated queries, structured logs and correlation IDs, backup/restore rehearsal, accessibility pass, race/fault tests, and committed benchmark artifacts. ADRs record the reservation and idempotency decisions.
+### V2 — measured hardening (as shipped)
+Shipped: authenticated single-operator boundary (encrypted session, CSRF, login
+throttle), indexed/paginated queries, structured logs and correlation IDs,
+cross-table order/item/SKU consistency constraints, browser E2E/axe
+accessibility pass, an exercised backup/restore rehearsal, and committed
+benchmark artifacts. Race/fault tests are configured in the Linux CI workflow
+but have not yet been observed on a remote run. **Explicitly descoped from V2:**
+role distinction (owner/operator/worker) — a single operator is the honest scope
+without a real user store. ADRs record the reservation, idempotency, fulfilment,
+reconciliation, and cross-table consistency decisions.
 
 ### V3 — one evidence-driven extension
 Choose one only: returns, a second location, notification outbox, barcode input, or SSE. Add it only after real use or measurement establishes the need.
@@ -195,7 +203,7 @@ Nothing below is marked completed without an executable check behind it.
 | Database constraints encode non-negative stock | completed | `inventory_balances_available_non_negative` check; integration tests |
 | Duplicate lines normalize; multi-SKU reservation is atomic | completed | `TestDuplicateLinesAreNormalized`, `TestMultiSKURollback`, `TestOneUnitFiftyBuyers` |
 | Same-key payload conflict and ambiguous retry are proven | completed | `TestIdempotencyPayloadConflict`, `TestIdempotentRetryReturnsOriginalOrder`, `TestConcurrentSameKeyCreatesOneOrder` |
-| Shipment/cancellation race and the five named tests pass in CI | completed | `TestCancellationVersusShipmentRace`, `TestDuplicateShipmentCannotDecrementTwice`, CI `go` job |
+| Shipment/cancellation race and the five named tests pass locally against PostgreSQL | completed | `TestCancellationVersusShipmentRace`, `TestDuplicateShipmentCannotDecrementTwice`; the Linux CI `go` job is configured to run them but has not yet been observed on a remote run (see `docs/release-evidence.md`) |
 | Reconciliation detects corruption without repair | completed | `TestReconciliationDetects*`, `TestReconciliationDoesNotRepairCorruptedRow` |
 | Balances reconcile against the immutable ledger, including missing rows | completed | `balance_matches_movement_ledger`; `TestReconciliationDetectsOnHandDriftAgainstLedger`, `TestReconciliationDetectsMissingBalanceRow` |
 | Shipment evidence validated exactly | completed | `shipped_line_has_one_matching_decrement`; `TestReconciliationDetectsShipmentEvidenceCorruption` |
@@ -206,10 +214,10 @@ Nothing below is marked completed without an executable check behind it.
 | ADRs explain rejected alternatives and known limits | completed | `docs/adr/0001`–`0005` |
 | No README/CV number lacks a reproducible artifact | completed | benchmark claims point at `benchmarks/raw/`; this matrix |
 | No unfinished headline feature appears on the CV | completed | status table in README; scope prohibitions |
-| Role distinction (owner/operator/worker) | deferred | a single operator is the honest scope for a demo; roles need a real user store |
+| Role distinction (owner/operator/worker) | deferred | explicitly descoped from V2: a single operator is the honest scope for a demo; roles need a real user store |
 | Second location / multi-warehouse | deferred | outside scope prohibitions |
-| `node`/`vitest` dev-tool advisories | deferred | affect the dev server/Vitest UI, not the shipped static build; tracked as a known limitation |
-| Local Windows race detector | not applicable | CI runs `go test -race` on Linux; Windows lacks a supported C toolchain here |
+| `node`/`vitest` dev-tool advisories | deferred | 5 dev-toolchain advisories (3 moderate, 1 high, 1 critical) at freeze time; affect the dev server/Vitest UI/build transform, not the shipped static build; tracked with acceptance checks in `docs/dependency-upgrade-plan.md` |
+| Local Windows race detector | not applicable | Linux CI is configured to run `go test -race`; that run has not yet been observed remotely, and Windows lacks a 64-bit C toolchain here |
 
 **CV gate:** StockFlow may be listed only for the completed rows above, each of
 which has an executable check. Do not describe the deferred or not-applicable
