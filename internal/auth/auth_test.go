@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"strings"
@@ -115,10 +116,16 @@ func TestSessionRoundTripAndTamper(t *testing.T) {
 		t.Fatal("forged CSRF token should not validate")
 	}
 
-	// Flipping any character must fail authentication.
-	tampered := []byte(value)
-	tampered[len(tampered)-1] ^= 0x01
-	if _, err := manager.Parse(string(tampered)); !errors.Is(err, ErrInvalidSession) {
+	// Mutate an authenticated ciphertext byte, then re-encode it. Mutating a
+	// base64 character directly can change only unused padding bits and leave
+	// the decoded bytes unchanged for some token lengths.
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		t.Fatalf("decode issued session: %v", err)
+	}
+	raw[len(raw)-1] ^= 0x01
+	tampered := base64.RawURLEncoding.EncodeToString(raw)
+	if _, err := manager.Parse(tampered); !errors.Is(err, ErrInvalidSession) {
 		t.Fatalf("tampered session error = %v, want ErrInvalidSession", err)
 	}
 	for _, bad := range []string{"", "not-base64!!", "AAAA"} {
